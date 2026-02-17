@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<body>
+<h2>Air Pen Motion Test</h2>
+<button id="startBtn">Start Motion Streaming</button>
+
+<script>
+let ws;
+
+document.getElementById("startBtn").onclick = async () => {
+  try {
+    const perm = await DeviceMotionEvent.requestPermission();
+    if (perm !== "granted") {
+      alert("Permission denied! Make sure you tap this button and refresh the page if needed.");
+      return;
+    }
+
+    ws = new WebSocket("ws://172.20.10.8:8765");
+
+    ws.onopen = () => console.log("WebSocket open");
+    ws.onerror = (err) => console.log("WebSocket error:", err);
+
+    window.addEventListener("devicemotion", event => {
+      if (ws.readyState === 1 && event.acceleration) {
+        ws.send(JSON.stringify({
+          ax: event.acceleration.x || 0,
+          ay: event.acceleration.y || 0,
+          az: event.acceleration.z || 0
+        }));
+      }
+    });
+
+    alert("Streaming started! Move your phone now.");
+  } catch (e) {
+    console.error(e);
+  }
+};
+</script>
+</body>
+</html>
