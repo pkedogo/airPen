@@ -1,40 +1,285 @@
 <!DOCTYPE html>
-<html>
-<body>
-<h2>Air Pen Motion Test</h2>
-<button id="startBtn">Start Motion Streaming</button>
-
-<script>
-let ws;
-
-document.getElementById("startBtn").onclick = async () => {
-  try {
-    const perm = await DeviceMotionEvent.requestPermission();
-    if (perm !== "granted") {
-      alert("Permission denied! Make sure you tap this button and refresh the page if needed.");
-      return;
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Air Pen</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #10131a;
+      color: #f3f4f6;
     }
 
-    ws = new WebSocket("ws://172.20.10.8:8765");
+    .wrap {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 20px;
+    }
 
-    ws.onopen = () => console.log("WebSocket open");
-    ws.onerror = (err) => console.log("WebSocket error:", err);
+    h1 {
+      font-size: 1.4rem;
+      margin: 0 0 12px;
+    }
 
-    window.addEventListener("devicemotion", event => {
-      if (ws.readyState === 1 && event.acceleration) {
-        ws.send(JSON.stringify({
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    input, button, select {
+      border: 1px solid #3a4050;
+      background: #1a2030;
+      color: #f3f4f6;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 14px;
+    }
+
+    input {
+      width: 100%;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    #status {
+      color: #9ca3af;
+      font-size: 13px;
+      min-height: 20px;
+    }
+
+    #canvas {
+      width: 100%;
+      height: 65vh;
+      border: 1px solid #2a3140;
+      border-radius: 10px;
+      background: #0b0f18;
+      display: block;
+      touch-action: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Air Pen</h1>
+
+    <div class="controls">
+      <div class="row">
+        <select id="role">
+          <option value="viewer">Laptop (Viewer)</option>
+          <option value="sender">Phone (Sender)</option>
+        </select>
+      </div>
+      <input id="wsUrl" placeholder="ws://YOUR-MAC-IP:8765" />
+      <div class="row">
+        <button id="connectBtn">Connect</button>
+        <button id="startBtn">Start IMU</button>
+        <button id="resetBtn">Reset Stroke</button>
+        <button id="clearBtn">Clear Canvas</button>
+      </div>
+      <div id="status">Disconnected</div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <script>
+    const wsUrlInput = document.getElementById("wsUrl");
+    const roleSelect = document.getElementById("role");
+    const connectBtn = document.getElementById("connectBtn");
+    const startBtn = document.getElementById("startBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const statusEl = document.getElementById("status");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    const host = location.hostname || "127.0.0.1";
+    wsUrlInput.value = `ws://${host}:8765`;
+    roleSelect.value = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? "sender" : "viewer";
+
+    let ws = null;
+    let motionStarted = false;
+    let gravity = { x: 0, y: 0, z: 0 };
+    let lastEventTime = null;
+    let lastDrawPoint = null;
+
+    function isViewer() {
+      return roleSelect.value === "viewer";
+    }
+
+    function updateControlsByRole() {
+      const viewer = isViewer();
+      startBtn.disabled = viewer;
+      clearBtn.disabled = !viewer;
+      setStatus(viewer ? "Viewer mode: waiting for phone data" : "Sender mode: connect then start IMU");
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      clearCanvas();
+    }
+
+    function clearCanvas() {
+      ctx.fillStyle = "#0b0f18";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      lastDrawPoint = null;
+    }
+
+    function drawPoint(normX, normY) {
+      const rect = canvas.getBoundingClientRect();
+      const px = ((normX + 1) * 0.5) * rect.width;
+      const py = ((1 - normY) * 0.5) * rect.height;
+
+      if (lastDrawPoint) {
+        ctx.beginPath();
+        ctx.moveTo(lastDrawPoint.x, lastDrawPoint.y);
+        ctx.lineTo(px, py);
+        ctx.strokeStyle = "#60a5fa";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      lastDrawPoint = { x: px, y: py };
+    }
+
+    function connect() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        setStatus("Already connected");
+        return;
+      }
+
+      ws = new WebSocket(wsUrlInput.value.trim());
+
+      ws.onopen = () => setStatus("Connected");
+      ws.onerror = () => setStatus("WebSocket error");
+      ws.onclose = () => setStatus("Disconnected");
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "point" && isViewer()) {
+            const x = Math.max(-1, Math.min(1, data.x / 2));
+            const y = Math.max(-1, Math.min(1, data.y / 2));
+            drawPoint(x, y);
+          } else if (data.type === "reset") {
+            lastDrawPoint = null;
+          }
+        } catch {
+          // Ignore malformed packets
+        }
+      };
+    }
+
+    function buildLinearAcceleration(event) {
+      const alpha = 0.9;
+
+      if (event.acceleration && event.acceleration.x !== null) {
+        return {
           ax: event.acceleration.x || 0,
           ay: event.acceleration.y || 0,
-          az: event.acceleration.z || 0
-        }));
+          az: event.acceleration.z || 0,
+        };
       }
-    });
 
-    alert("Streaming started! Move your phone now.");
-  } catch (e) {
-    console.error(e);
-  }
-};
-</script>
+      const includingG = event.accelerationIncludingGravity;
+      if (!includingG) {
+        return { ax: 0, ay: 0, az: 0 };
+      }
+
+      gravity.x = alpha * gravity.x + (1 - alpha) * (includingG.x || 0);
+      gravity.y = alpha * gravity.y + (1 - alpha) * (includingG.y || 0);
+      gravity.z = alpha * gravity.z + (1 - alpha) * (includingG.z || 0);
+
+      return {
+        ax: (includingG.x || 0) - gravity.x,
+        ay: (includingG.y || 0) - gravity.y,
+        az: (includingG.z || 0) - gravity.z,
+      };
+    }
+
+    async function startMotion() {
+      if (isViewer()) {
+        setStatus("Switch role to Phone (Sender) to stream IMU");
+        return;
+      }
+
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        setStatus("Connect WebSocket first");
+        return;
+      }
+
+      if (motionStarted) {
+        setStatus("IMU already streaming");
+        return;
+      }
+
+      if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+        const perm = await DeviceMotionEvent.requestPermission();
+        if (perm !== "granted") {
+          setStatus("Motion permission denied");
+          return;
+        }
+      }
+
+      window.addEventListener("devicemotion", (event) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+
+        const linear = buildLinearAcceleration(event);
+
+        const now = performance.now();
+        const dt = lastEventTime == null ? 0.016 : Math.max(0.005, (now - lastEventTime) / 1000);
+        lastEventTime = now;
+
+        ws.send(JSON.stringify({
+          type: "imu",
+          ax: linear.ax,
+          ay: linear.ay,
+          az: linear.az,
+          dt,
+        }));
+      });
+
+      motionStarted = true;
+      setStatus("IMU streaming started");
+    }
+
+    connectBtn.addEventListener("click", connect);
+    roleSelect.addEventListener("change", updateControlsByRole);
+    startBtn.addEventListener("click", () => startMotion().catch((err) => setStatus(`Error: ${err.message}`)));
+    resetBtn.addEventListener("click", () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "reset" }));
+      }
+      lastDrawPoint = null;
+    });
+    clearBtn.addEventListener("click", clearCanvas);
+
+    window.addEventListener("resize", resizeCanvas);
+    resizeCanvas();
+    updateControlsByRole();
+  </script>
 </body>
 </html>
